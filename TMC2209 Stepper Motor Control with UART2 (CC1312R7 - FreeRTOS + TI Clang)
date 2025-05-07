@@ -1,0 +1,185 @@
+// TMC2209 Stepper Motor Control with UART2 (CC1312R7 - FreeRTOS + TI Clang)
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+#include <ti/drivers/GPIO.h>
+#include <ti/drivers/UART2.h>
+#include <ti/drivers/Board.h>
+#include <FreeRTOS.h>
+#include <task.h>
+
+#include "ti_drivers_config.h"
+
+#include <ti/drivers/dpl/ClockP.h>
+#include <math.h>
+#define STEP_PIN CONFIG_GPIO_STEP
+#define DIR_PIN CONFIG_GPIO_DIR
+#define LED_PIN CONFIG_GPIO_LED_0
+
+#define STEP_DELAY_US 5000   // 1 millisecond HIGH, 1 millisecond LOW -> 500 steps/secDelay between step pulses (us)
+#define MOTOR_ANGLE   145     // Choose your desired angle here
+
+#define STEPS_PER_REV 200 // 200 = 1 revolution
+
+volatile bool currentDirectionCW = true; // for direction
+
+typedef struct {
+    float angle;
+    bool directionCW;
+} MotorMove;
+
+UART2_Handle uart;
+UART2_Params uartParams;
+
+void tmc2209_uart_send(uint8_t *data, size_t len) {
+    size_t bytesWritten;
+    UART2_write(uart, data, len, &bytesWritten);
+}
+
+// Compute CRC (Cyclic Redundancy Check) according to TMC2209 datasheet
+uint8_t tmc2209_calc_crc(uint8_t *data, size_t len) {
+    uint8_t crc = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t curr = data[i];
+        for (uint8_t b = 0; b < 8; b++) {
+            uint8_t mix = (crc ^ curr) & 0x01;
+            crc >>= 1;
+            if (mix) crc ^= 0x8C;
+            curr >>= 1;
+        }
+    }
+    return crc;
+}
+
+void tmc2209_set_microsteps_256(uint8_t slaveAddr) {
+    uint32_t chopconf_val = 0x00010000;  // TOFF = 1, MRES = 0 (256 microsteps)
+    uint8_t packet[8];
+
+    packet[0] = 0x05;                      // Sync
+    packet[1] = (slaveAddr | 0x80);        // Slave | Write
+    packet[2] = 0x6C;                      // CHOPCONF register
+    packet[3] = (uint8_t)(chopconf_val & 0xFF);
+    packet[4] = (uint8_t)((chopconf_val >> 8) & 0xFF);
+    packet[5] = (uint8_t)((chopconf_val >> 16) & 0xFF);
+    packet[6] = (uint8_t)((chopconf_val >> 24) & 0xFF);
+    packet[7] = tmc2209_calc_crc(packet, 7);
+
+    tmc2209_uart_send(packet, 8);
+}
+
+// Enable StallGuard feature
+void tmc2209_enable_stallguard(uint8_t slaveAddr) {
+    uint32_t gconf_val = 0x00000001;  // Enable StallGuard (SG_RESULT in GCONF)
+    uint8_t packet[8];
+
+    packet[0] = 0x05;                      // Sync
+    packet[1] = (slaveAddr | 0x80);        // Slave | Write
+    packet[2] = 0x00;                      // GCONF register
+    packet[3] = (uint8_t)(gconf_val & 0xFF);
+    packet[4] = (uint8_t)((gconf_val >> 8) & 0xFF);
+    packet[5] = (uint8_t)((gconf_val >> 16) & 0xFF);
+    packet[6] = (uint8_t)((gconf_val >> 24) & 0xFF);
+    packet[7] = tmc2209_calc_crc(packet, 7);
+
+    tmc2209_uart_send(packet, 8);
+}
+
+// Read the StallGuard status
+void tmc2209_read_stallguard(uint8_t slaveAddr) {
+    uint8_t packet[8];
+    packet[0] = 0x03;  // Read command
+    packet[1] = (slaveAddr | 0x80); // Slave | Write
+    packet[2] = 0x12;  // Read SG_RESULT register (StallGuard)
+    packet[3] = 0x00;
+    packet[4] = 0x00;
+    packet[5] = 0x00;
+    packet[6] = 0x00;
+    packet[7] = tmc2209_calc_crc(packet, 7);
+
+    tmc2209_uart_send(packet, 8);
+
+    // Logic to receive and process the StallGuard result will go here
+    uint8_t reply[8];
+    size_t bytesRead;
+
+    // After sending the read request:
+    UART2_read(uart, reply, 8, &bytesRead);
+
+    // Now decode the reply
+    uint32_t sg_result =
+        (reply[6] << 24) |
+        (reply[5] << 16) |
+        (reply[4] << 8)  |
+        (reply[3]);
+
+    // Now sg_result contains your StallGuard value!
+
+}
+
+
+void rotate_motor_steps(float angle, bool directionCW)  {
+    uint32_t steps = round(angle / 1.8); // Full step mode
+ GPIO_write(STEP_PIN, directionCW);    // Set direction
+
+    for (int i = 0; i < steps ; i++) {  // 200 steps = 1 full rotation
+        GPIO_write(DIR_PIN, 1);
+        ClockP_usleep(500); // 500 us HIGH
+        GPIO_write(DIR_PIN, 0);
+        ClockP_usleep(500); // 500 us HIGH
+    }
+}
+
+
+
+void motorTask(void *arg0) {
+    // UART2 Setup
+    UART2_Params_init(&uartParams);
+    uartParams.baudRate = 115200;
+    uartParams.readMode = UART2_Mode_BLOCKING;
+    uartParams.writeMode = UART2_Mode_BLOCKING;
+
+    uart = UART2_open(CONFIG_UART2_0, &uartParams);
+    if (uart == NULL) {
+        while (1); // UART failed
+    }
+    tmc2209_set_microsteps_256(0x00); //  MS1,MS2,EN are ground hence slave address is 0x00
+    tmc2209_enable_stallguard(0x00);  // Enable StallGuard
+
+    // GPIO Setup
+    GPIO_setConfig(STEP_PIN, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_LOW);
+    GPIO_setConfig(DIR_PIN, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_LOW);
+    GPIO_setConfig(LED_PIN, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_LOW);  // LED
+
+    // Confirm UART2 working
+    const char msg[] = "UART2 working!\r\n";
+    tmc2209_uart_send((uint8_t *)msg, sizeof(msg) - 1);
+
+    while (1) {
+        // Read StallGuard status
+        tmc2209_read_stallguard(0x00);  // Replace 0x00 with your slave address
+
+
+        // Set LED ON for CW
+        GPIO_write(CONFIG_GPIO_LED_0, 1);
+        rotate_motor_steps(MOTOR_ANGLE, currentDirectionCW);
+        ClockP_sleep(1);
+
+
+        // Set LED OFF for CCW
+        GPIO_write(CONFIG_GPIO_LED_0, 0);
+        rotate_motor_steps(MOTOR_ANGLE, !currentDirectionCW);
+        ClockP_sleep(1);
+
+    }
+
+}
+
+int mainThread(void) {
+    Board_init();
+    GPIO_init();
+    xTaskCreate(motorTask, "MotorTask", 1024, NULL, 1, NULL);
+    vTaskStartScheduler();
+
+    while (1);
+}
