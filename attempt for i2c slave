@@ -1,0 +1,74 @@
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <ti/drivers/GPIO.h>
+#include <ti/drivers/I2C.h>
+#include "ti_drivers_config.h"
+
+
+#define I2C_BASE_ADDR   0x40020000  // Base address of I2C peripheral
+#define I2C_SOAR        *((volatile uint32_t *)(I2C_BASE_ADDR + 0x00)) // Slave Own Address Register
+#define I2C_SCTL        *((volatile uint32_t *)(I2C_BASE_ADDR + 0x04)) // Slave Control Register
+#define SSTAT_REG       *((volatile uint32_t *)(I2C_BASE_ADDR + 0x04)) // Status Register
+#define SDR_REG         *((volatile uint32_t *)(I2C_BASE_ADDR + 0x08)) // Data Register
+
+#define SSTAT_RREQ   (1 << 0)  // Receive Request bit
+#define SSTAT_TREQ   (1 << 1)  // Transmit Request bit
+#define SSTAT_FBR    (1 << 2)  // First Byte Received bit
+int p = 0;
+void I2C_Slave_Init(uint8_t slave_address) {
+    // Set the 7-bit Slave Address
+    I2C_SOAR = (slave_address & 0x7F);
+
+    // Enable I2C Slave Mode
+//    I2C_SCTL = 0x1;  // Set DA bit to 1 (Enable Slave Operation)
+    I2C_SCTL = 0x3;  // Enable slave mode and auto ACK
+
+    //printf("I2C Slave initialized at address 0x%02X\n", slave_address);
+}
+
+void handle_i2c_slave() {
+    //printf("I2C Slave initialized at address ");
+    p = p + 1;
+    uint32_t sstat_value = SSTAT_REG;  // Read SSTAT register
+    p = p + 1;
+    p = p + 1;
+    //printf("SSTAT_REG: 0x%08X\n", SSTAT_REG);
+    // First Byte Received (FBR) Handling
+    if (sstat_value & SSTAT_FBR) {
+        //printf("First byte received after slave address.\n");
+    }
+
+    // Handle Receive Request (RREQ)
+    if (sstat_value & SSTAT_RREQ) {
+        uint8_t received_data = SDR_REG;  // Read data from SDR
+        //printf("Received data: 0x%02X\n", received_data);
+    }
+
+    // Handle Transmit Request (TREQ)
+    if (sstat_value & SSTAT_TREQ) {
+        uint8_t data_to_send = 0xAB;  // Example data to send to Raspberry Pi
+        SDR_REG = data_to_send;  // Write data to SDR_REG
+        //printf("Transmitted data: 0x%02X\n", data_to_send);
+    }
+}
+
+void *mainThread(void *arg0) {
+    // Initialize GPIO and I2C drivers
+    GPIO_init();
+    I2C_init();
+
+    //printf("CC1312R7 is now an I2C slave!\n");
+
+    // Set the slave address (modify as needed)
+    uint8_t mySlaveAddress = 0x3C;
+    I2C_Slave_Init(mySlaveAddress);
+    p = p + 1;
+    p = p + 1;
+    //printf("I2C Slave initialized at address ");
+    while (1) {
+    handle_i2c_slave();
+    }
+
+    return NULL;
+}

@@ -1,0 +1,111 @@
+/*
+ *  ======== timerled.c ========
+ */
+
+#include <stddef.h>
+
+/* Driver Header files */
+#include <ti/drivers/GPIO.h>
+#include <ti/drivers/Timer.h>
+
+/* Board Header file */
+#include "ti_drivers_config.h"
+/* Driver Header files */
+#include <ti/drivers/PWM.h>
+
+/* Driver configuration */
+#include "ti_drivers_config.h"
+#include <ti/drivers/GPIO.h>
+/* Callback used for toggling the LED. */
+void timerCallback(Timer_Handle myHandle, int_fast16_t status);
+PWM_Handle pwm1    = NULL;
+/*
+ *  ======== mainThread ========
+ */
+void *mainThread(void *arg0)
+{
+    Timer_Handle timer0;
+    Timer_Params params1;
+    uint16_t pwmPeriod = 3000; // 3 ms = 333 Hz
+    uint16_t duty      = 1500; // 50% duty
+//    PWM_Handle pwm1    = NULL;
+    PWM_Handle pwm2    = NULL;
+    PWM_Params params;
+    float position = 360.0;
+//     float stepAngle = 0.05625; // 1/32 mode
+    float stepAngle =1.8; // full step mode
+
+
+
+     // <-- Float variable for delay time in milliseconds
+    PWM_init();
+    PWM_Params_init(&params);
+    GPIO_setConfig(CONFIG_GPIO_DIR, GPIO_CFG_OUTPUT);
+
+
+    params.dutyUnits   = PWM_DUTY_US;
+    params.dutyValue   = duty;
+    params.periodUnits = PWM_PERIOD_US;
+    params.periodValue = pwmPeriod;
+
+    pwm1 = PWM_open(CONFIG_PWM_0, &params);
+    if (pwm1 == NULL) while (1) {}
+
+    pwm2 = PWM_open(CONFIG_PWM_1, &params);
+    if (pwm2 == NULL) while (1) {}
+    /* Call driver init functions */
+    GPIO_init();
+    Timer_init();
+    float delayTimeus = (position / stepAngle) * pwmPeriod;
+      if (position < 0) {
+               GPIO_write(CONFIG_GPIO_DIR, 1); // Reverse direction
+               delayTimeus =(position / stepAngle) * pwmPeriod * -1;
+          } else {
+               GPIO_write(CONFIG_GPIO_DIR, 0); // Forward direction
+          }
+
+
+
+    /* Configure the LED pin */
+    GPIO_setConfig(CONFIG_GPIO_LED_0, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_LOW);
+
+    /* Turn off user LED */
+    GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_OFF);
+
+    /*
+     * Setting up the timer in continuous callback mode that calls the callback
+     * function every 1,000,000 microseconds, or 1 second.
+     */
+    Timer_Params_init(&params1);
+    params1.period        = delayTimeus;
+    params1.periodUnits   = Timer_PERIOD_US;
+    params1.timerMode     = Timer_ONESHOT_CALLBACK;
+    params1.timerCallback = timerCallback;
+
+    timer0 = Timer_open(CONFIG_TIMER_0, &params1);
+    PWM_start(pwm1);
+    if (timer0 == NULL)
+    {
+        /* Failed to initialized timer */
+        while (1) {}
+    }
+
+    if (Timer_start(timer0) == Timer_STATUS_ERROR)
+    {
+        /* Failed to start timer */
+        while (1) {}
+    }
+
+    return (NULL);
+}
+
+/*
+ * This callback is called every 1,000,000 microseconds, or 1 second. Because
+ * the LED is toggled each time this function is called, the LED will blink at
+ * a rate of once every 2 seconds.
+ */
+void timerCallback(Timer_Handle myHandle, int_fast16_t status)
+{
+    PWM_stop(pwm1);
+    GPIO_toggle(CONFIG_GPIO_LED_0);
+}
